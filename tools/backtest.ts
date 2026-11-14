@@ -18,6 +18,8 @@ const to = flag('--to') ? Date.parse(flag('--to')!) / 1000 : Infinity;
 const step = Number(flag('--step') ?? 30);
 const unlisted = new Set((flag('--unlisted') ?? '').split(',').filter(Boolean));
 const byMarket = args.includes('--by-market');
+const calibOut = args.includes('--calib');
+const tag = (args[0].split(/[\/]/).pop() ?? '').replace('.json', '');
 const maxp = Number(flag('--maxp') ?? 1);
 const paramSets: Partial<Params>[] = args[1] && !args[1].startsWith('--') ? [].concat(JSON.parse(args[1])) : [{}];
 
@@ -29,20 +31,24 @@ function baseline(prices: number[], horizon: number): number[][] {
   return rows;
 }
 
+const calib = { below: [0, 0, 0, 0, 0], loss: [0, 0, 0, 0, 0], n: 0 };
 function pinball(q: number[][], ys: number[]): { sum: number; n: number } {
   let sum = 0, n = 0;
   for (let h = 0; h < ys.length; h++) {
     const y = ys[h];
     for (let j = 0; j < 5; j++) {
       const d = y - q[h][j];
-      sum += 100 * Math.max(TAUS[j] * d, (TAUS[j] - 1) * d);
+      const l = 100 * Math.max(TAUS[j] * d, (TAUS[j] - 1) * d);
+      sum += l;
       n++;
+      if (track) { calib.loss[j] += l; if (y < q[h][j]) calib.below[j]++; else if (y === q[h][j]) calib.below[j] += 0.5; }
     }
   }
   return { sum, n };
 }
 
-type Model = (prices: number[], listed: boolean) => number[][];
+let track = false;
+type Model = (prices: number[], listed: boolean, atMin: number) => number[][];
 function run(model: Model) {
   let sum = 0, n = 0, cases = 0;
   const per: Record<string, { sum: number; n: number }> = {};
@@ -56,7 +62,7 @@ function run(model: Model) {
       const hist = m.prices.slice(lo, c + 1);
       if (hist[hist.length - 1] > maxp) continue;
       const ys = m.prices.slice(c + 1, c + 241);
-      const q = model(hist, listed && lo === 0);
+      const q = model(hist, listed && lo === 0, at / 60);
       const r = pinball(q, ys);
       sum += r.sum; n += r.n; cases++;
       (per[m.name] ??= { sum: 0, n: 0 }).sum += r.sum;
@@ -67,11 +73,14 @@ function run(model: Model) {
 }
 
 const b = run((p) => baseline(p, 240));
-console.log(`baseline ${b.loss.toFixed(6)} (${b.cases} market-cases)`);
+console.log(`${tag} baseline ${b.loss.toFixed(6)} (${b.cases} market-cases)`);
 for (const ps of paramSets) {
   const p = { ...DEFAULTS, ...ps };
-  const r = run((pr, listed) => forecastMarket(pr, listed, 240, p));
-  console.log(`model ${r.loss.toFixed(6)} ${JSON.stringify(ps)}`);
+  track = calibOut; calib.below.fill(0); calib.loss.fill(0); calib.n = 0;
+  const r = run((pr, listed, atMin) => forecastMarket(pr, listed, 240, p, atMin));
+  track = false;
+  console.log(`${tag} model ${r.loss.toFixed(6)} ${JSON.stringify(ps)}`);
+  if (calibOut) { const N = r.cases * 240; console.log('  P(y<q) ' + calib.below.map((b) => (b / N).toFixed(3)).join(' ') + ' | loss share ' + calib.loss.map((l) => (l / N / 5).toFixed(4)).join(' ')); }
   if (byMarket) console.log('  ' + Object.entries(r.per).map(([k, v]) => `${k}:${(v.sum / v.n).toFixed(4)}`).join(' '));
 }
 if (byMarket) console.log('baseline ' + Object.entries(b.per).map(([k, v]) => `${k}:${(v.sum / v.n).toFixed(4)}`).join(' '));

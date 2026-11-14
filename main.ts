@@ -26,6 +26,16 @@ export interface Params {
   priorK: number; // pseudo-pairs given to the parametric fan
   widen: number; // multiplier on every quantile offset
   driftKeep: number; // share of the history's median h-minute change kept as drift (0: the fan is centred)
+  hlPerH: number; // the half-life grows by this many minutes per minute of horizon (long horizons need more pairs)
+  widenOut: number; // extra multiplier on the 5% and 95% offsets
+  widenIn: number; // extra multiplier on the 25% and 75% offsets
+  diurnalA: number; // amplitude of the time-of-day activity profile (0: off)
+  diurnalPeak: number; // UTC hour of peak activity
+  diurnalPow: number; // offsets scale as (activity ahead / activity in the history) ^ this
+  relPow: number; // a past change is scaled by (price now / price then) ^ this (0: absolute changes)
+  relFloor: number; // prices below this count as this in that ratio
+  snap: number; // round each offset to a multiple of this (0: off); midpoints live on a 0.0005 grid
+  widenH: number; // the width multiplier also scales as (h / 60) ^ this
 }
 
 export const DEFAULTS: Params = {
@@ -38,7 +48,18 @@ export const DEFAULTS: Params = {
   priorK: 200,
   widen: 0.8,
   driftKeep: 0,
+  hlPerH: 0,
+  widenOut: 1,
+  widenIn: 1,
+  diurnalA: 0,
+  diurnalPeak: 17,
+  diurnalPow: 1,
+  relPow: 0.5,
+  relFloor: 0.01,
+  snap: 0.0005,
+  widenH: 0,
 };
+const WJ = (p: Params) => [p.widenOut, p.widenIn, 1, p.widenIn, p.widenOut];
 
 const H_GRID = [1, 2, 3, 5, 8, 12, 17, 25, 35, 50, 70, 100, 140, 190, 240];
 
@@ -75,8 +96,13 @@ function median(a: number[]): number {
  * Quantile rows for one market. prices: one per minute up to the checkpoint; listed: true when the first price is
  * the market's listing (the history starts inside the 72 h window).
  */
-export function forecastMarket(prices: number[], listed: boolean, horizon: number, p: Params = DEFAULTS): number[][] {
+export function forecastMarket(prices: number[], listed: boolean, horizon: number, p: Params = DEFAULTS, atMin?: number): number[][] {
   const N = prices.length;
+  // time-of-day activity profile: f(t) = 1 + A cos(2 pi (hourUTC - peak) / 24), t in unix minutes
+  const useDiurnal = atMin !== undefined && p.diurnalA !== 0;
+  const f = (t: number) => 1 + p.diurnalA * Math.cos((2 * Math.PI * (((t / 60) % 24) - p.diurnalPeak)) / 24);
+  const futF: number[] = [0];
+  if (useDiurnal) { let acc = 0; for (let k = 1; k <= 240; k++) { acc += f(atMin! + k); futF.push(acc / k); } }
   const x = prices[N - 1];
   let u0 = listed ? Math.min(p.skipListing, Math.max(0, N - 60)) : 0;
   u0 = Math.max(u0, N - p.lookback);
@@ -90,18 +116,27 @@ export function forecastMarket(prices: number[], listed: boolean, horizon: numbe
   // parametric prior offsets per horizon: a scaled normal fan
   const scale = p.priorSigma * Math.max(0.2, Math.sqrt(Math.max(x, 0.001) / 0.03));
 
+  const wj = WJ(p);
   const offs: number[][] = []; // offs[k][j] for H_GRID[k], tau j
   for (const h of H_GRID) {
     const vals: number[] = [];
     const ws: number[] = [];
+    const hl = p.halfLife + p.hlPerH * h;
     for (let i = u0; i + h <= N - 1; i++) {
       const age = N - 1 - (i + h);
-      vals.push(g[i + h] - g[i]);
-      ws.push(Math.pow(0.5, age / p.halfLife));
+      const lv = p.relPow ? Math.pow(Math.max(x, p.relFloor) / Math.max(g[i], p.relFloor), p.relPow) : 1;
+      vals.push((g[i + h] - g[i]) * lv);
+      ws.push(Math.pow(0.5, age / hl));
     }
     let sw = 0, sw2 = 0;
     for (const w of ws) { sw += w; sw2 += w * w; }
     const neff = sw2 > 0 ? (sw * sw) / sw2 : 0;
+    let tod = 1;
+    if (useDiurnal && ws.length) {
+      let fh = 0;
+      for (let i = u0, k = 0; i + h <= N - 1; i++, k++) fh += ws[k] * f(atMin! - (N - 1 - i) + h / 2);
+      tod = Math.pow(futF[Math.min(h, 240)] / (fh / sw), p.diurnalPow);
+    }
     const row: number[] = [];
     const eq = vals.length ? wquantiles(vals, ws) : null;
     if (eq) { const m = eq[2] * (1 - p.driftKeep); for (let j = 0; j < 5; j++) eq[j] -= m; }
@@ -109,7 +144,7 @@ export function forecastMarket(prices: number[], listed: boolean, horizon: numbe
       const prior = Z[j] * scale * Math.sqrt(h);
       const emp = eq ? eq[j] : prior;
       const a = neff / (neff + p.priorK);
-      row.push((a * emp + (1 - a) * prior) * p.widen);
+      row.push((a * emp + (1 - a) * prior) * p.widen * Math.pow(h / 60, p.widenH) * wj[j] * tod);
     }
     offs.push(row);
   }
@@ -127,7 +162,11 @@ export function forecastMarket(prices: number[], listed: boolean, horizon: numbe
       const t = (Math.sqrt(h) - a) / (b - a);
       o = offs[k].map((v, j) => v + t * (offs[k + 1][j] - v));
     }
-    const row = o.map((d) => Math.min(1, Math.max(0, centre + d)));
+    const row = o.map((d) => {
+      let v = centre + d;
+      if (p.snap > 0) v = centre + Math.round(d / p.snap) * p.snap;
+      return Math.min(1, Math.max(0, v));
+    });
     for (let j = 1; j < 5; j++) if (row[j] < row[j - 1]) row[j] = row[j - 1];
     rows.push(row.map((v) => Math.round(v * 1e6) / 1e6 + 0));
   }
@@ -141,7 +180,7 @@ export function forecastCase(c: Case, p: Params = DEFAULTS): { id: string; q: nu
   const atMs = Date.parse(c.at);
   return c.markets.map((m) => {
     const listed = Date.parse(m.start) > atMs - 4320 * 60000 + 60000;
-    return { id: m.id, q: forecastMarket(m.prices, listed, c.horizon_minutes, p) };
+    return { id: m.id, q: forecastMarket(m.prices, listed, c.horizon_minutes, p, Math.round(atMs / 60000)) };
   });
 }
 
