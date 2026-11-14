@@ -39,6 +39,7 @@ export interface Params {
   clusterHL: number; // half-life (minutes) of the short activity window
   clusterPow: number; // offsets scale as (short activity / long activity) ^ (this * tau / (tau + h)); 0: off
   clusterTau: number; // horizon (minutes) over which the clustering effect fades to half
+  monoH: boolean; // force fans to widen monotonically with the horizon
   priorK0: number; // pseudo-pairs of the level-scaled prior in the normal fan's variance (-1: fixed prior fan)
 }
 
@@ -66,6 +67,7 @@ export const DEFAULTS: Params = {
   clusterPow: 0.9,
   clusterTau: 360,
   priorK0: 40,
+  monoH: true,
 };
 const WJ = (p: Params) => [p.widenOut, p.widenIn, 1, p.widenIn, p.widenOut];
 
@@ -178,6 +180,14 @@ export function forecastMarket(prices: number[], listed: boolean, horizon: numbe
       row.push((a * emp + (1 - a) * prior) * p.widen * Math.pow(h / 60, p.widenH) * wj[j] * tod);
     }
     offs.push(row);
+  }
+
+  if (p.monoH) {
+    // fans only widen with the horizon: lower offsets never rise, upper offsets never fall
+    for (let k = 1; k < offs.length; k++) {
+      for (let j = 0; j < 2; j++) offs[k][j] = Math.min(offs[k][j], offs[k - 1][j]);
+      for (let j = 3; j < 5; j++) offs[k][j] = Math.max(offs[k][j], offs[k - 1][j]);
+    }
   }
 
   const rows: number[][] = [];
