@@ -36,11 +36,14 @@ export interface Params {
   relFloor: number; // prices below this count as this in that ratio
   snap: number; // round each offset to a multiple of this (0: off); midpoints live on a 0.0005 grid
   widenH: number; // the width multiplier also scales as (h / 60) ^ this
+  clusterHL: number; // half-life (minutes) of the short activity window
+  clusterPow: number; // offsets scale as (short activity / long activity) ^ (this * tau / (tau + h)); 0: off
+  clusterTau: number; // horizon (minutes) over which the clustering effect fades to half
 }
 
 export const DEFAULTS: Params = {
   skipListing: 360,
-  halfLife: 240,
+  halfLife: 1440,
   lookback: 4320,
   revert: 0,
   levelWin: 30,
@@ -58,6 +61,9 @@ export const DEFAULTS: Params = {
   relFloor: 0.01,
   snap: 0.0005,
   widenH: 0,
+  clusterHL: 30,
+  clusterPow: 0.9,
+  clusterTau: 360,
 };
 const WJ = (p: Params) => [p.widenOut, p.widenIn, 1, p.widenIn, p.widenOut];
 
@@ -116,6 +122,20 @@ export function forecastMarket(prices: number[], listed: boolean, horizon: numbe
   // parametric prior offsets per horizon: a scaled normal fan
   const scale = p.priorSigma * Math.max(0.2, Math.sqrt(Math.max(x, 0.001) / 0.03));
 
+  // volatility clustering: activity (mean |1-minute change|) over a short recent window against the long one
+  let actRatio = 1;
+  if (p.clusterPow) {
+    let sS = 0, wS = 0, sL = 0, wL = 0;
+    for (let i = Math.max(u0 + 1, 1); i < N; i++) {
+      const age = N - 1 - i;
+      const a = Math.abs(g[i] - g[i - 1]);
+      const ws_ = Math.pow(0.5, age / p.clusterHL), wl = Math.pow(0.5, age / p.halfLife);
+      sS += ws_ * a; wS += ws_; sL += wl * a; wL += wl;
+    }
+    const eps = 0.00002;
+    if (wS > 0 && wL > 0) actRatio = Math.min(3, Math.max(1 / 3, (sS / wS + eps) / (sL / wL + eps)));
+  }
+
   const wj = WJ(p);
   const offs: number[][] = []; // offs[k][j] for H_GRID[k], tau j
   for (const h of H_GRID) {
@@ -137,6 +157,7 @@ export function forecastMarket(prices: number[], listed: boolean, horizon: numbe
       for (let i = u0, k = 0; i + h <= N - 1; i++, k++) fh += ws[k] * f(atMin! - (N - 1 - i) + h / 2);
       tod = Math.pow(futF[Math.min(h, 240)] / (fh / sw), p.diurnalPow);
     }
+    if (p.clusterPow) tod *= Math.pow(actRatio, (p.clusterPow * p.clusterTau) / (p.clusterTau + h));
     const row: number[] = [];
     const eq = vals.length ? wquantiles(vals, ws) : null;
     if (eq) { const m = eq[2] * (1 - p.driftKeep); for (let j = 0; j < 5; j++) eq[j] -= m; }
