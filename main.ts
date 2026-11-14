@@ -39,6 +39,7 @@ export interface Params {
   clusterHL: number; // half-life (minutes) of the short activity window
   clusterPow: number; // offsets scale as (short activity / long activity) ^ (this * tau / (tau + h)); 0: off
   clusterTau: number; // horizon (minutes) over which the clustering effect fades to half
+  priorK0: number; // pseudo-pairs of the level-scaled prior in the normal fan's variance (-1: fixed prior fan)
 }
 
 export const DEFAULTS: Params = {
@@ -64,6 +65,7 @@ export const DEFAULTS: Params = {
   clusterHL: 30,
   clusterPow: 0.9,
   clusterTau: 360,
+  priorK0: 40,
 };
 const WJ = (p: Params) => [p.widenOut, p.widenIn, 1, p.widenIn, p.widenOut];
 
@@ -161,8 +163,16 @@ export function forecastMarket(prices: number[], listed: boolean, horizon: numbe
     const row: number[] = [];
     const eq = vals.length ? wquantiles(vals, ws) : null;
     if (eq) { const m = eq[2] * (1 - p.driftKeep); for (let j = 0; j < 5; j++) eq[j] -= m; }
+    // the normal fan's spread: the history's own mean square h-minute change, shrunk to the level-scaled prior
+    let sd = scale * Math.sqrt(h);
+    if (p.priorK0 >= 0 && vals.length) {
+      let ms = 0;
+      for (let k = 0; k < vals.length; k++) ms += ws[k] * vals[k] * vals[k];
+      ms /= sw;
+      sd = Math.sqrt((neff * ms + p.priorK0 * sd * sd) / (neff + p.priorK0));
+    }
     for (let j = 0; j < 5; j++) {
-      const prior = Z[j] * scale * Math.sqrt(h);
+      const prior = Z[j] * sd;
       const emp = eq ? eq[j] : prior;
       const a = neff / (neff + p.priorK);
       row.push((a * emp + (1 - a) * prior) * p.widen * Math.pow(h / 60, p.widenH) * wj[j] * tod);
