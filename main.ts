@@ -65,7 +65,7 @@ export const DEFAULTS: Params = {
   snap: 0.0005,
   widenH: 0,
   clusterHL: 30,
-  clusterPow: 0.9,
+  clusterPow: 0.6,
   clusterTau: 360,
   priorK0: 40,
   ensHL: [1440, 240],
