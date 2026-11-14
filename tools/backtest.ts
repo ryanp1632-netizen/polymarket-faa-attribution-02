@@ -75,9 +75,13 @@ function run(model: Model) {
 const b = run((p) => baseline(p, 240));
 console.log(`${tag} baseline ${b.loss.toFixed(6)} (${b.cases} market-cases)`);
 for (const ps of paramSets) {
-  const p = { ...DEFAULTS, ...ps };
+  // {"ens": [{...}, {...}]} averages the quantiles of several parameter sets
+  const members = ((ps as { ens?: Partial<Params>[] }).ens ?? [ps]).map((e) => ({ ...DEFAULTS, ...e }));
   track = calibOut; calib.below.fill(0); calib.loss.fill(0); calib.n = 0;
-  const r = run((pr, listed, atMin) => forecastMarket(pr, listed, 240, p, atMin));
+  const r = run((pr, listed, atMin) => {
+    const qs = members.map((p) => forecastMarket(pr, listed, 240, p, atMin));
+    return qs[0].map((row, h) => row.map((_, j) => qs.reduce((s, q) => s + q[h][j], 0) / qs.length));
+  });
   track = false;
   console.log(`${tag} model ${r.loss.toFixed(6)} ${JSON.stringify(ps)}`);
   if (calibOut) { const N = r.cases * 240; console.log('  P(y<q) ' + calib.below.map((b) => (b / N).toFixed(3)).join(' ') + ' | loss share ' + calib.loss.map((l) => (l / N / 5).toFixed(4)).join(' ')); }

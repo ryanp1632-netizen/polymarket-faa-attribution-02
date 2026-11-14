@@ -39,6 +39,7 @@ export interface Params {
   clusterHL: number; // half-life (minutes) of the short activity window
   clusterPow: number; // offsets scale as (short activity / long activity) ^ (this * tau / (tau + h)); 0: off
   clusterTau: number; // horizon (minutes) over which the clustering effect fades to half
+  ensHL: number[]; // half-lives of the ensemble members whose quantiles are averaged (empty: halfLife alone)
   monoH: boolean; // force fans to widen monotonically with the horizon
   priorK0: number; // pseudo-pairs of the level-scaled prior in the normal fan's variance (-1: fixed prior fan)
 }
@@ -67,6 +68,7 @@ export const DEFAULTS: Params = {
   clusterPow: 0.9,
   clusterTau: 360,
   priorK0: 40,
+  ensHL: [1440, 240],
   monoH: true,
 };
 const WJ = (p: Params) => [p.widenOut, p.widenIn, 1, p.widenIn, p.widenOut];
@@ -104,9 +106,20 @@ function median(a: number[]): number {
 
 /**
  * Quantile rows for one market. prices: one per minute up to the checkpoint; listed: true when the first price is
- * the market's listing (the history starts inside the 72 h window).
+ * the market's listing (the history starts inside the 72 h window). With p.ensHL set, the quantiles of one member
+ * per listed half-life are averaged.
  */
 export function forecastMarket(prices: number[], listed: boolean, horizon: number, p: Params = DEFAULTS, atMin?: number): number[][] {
+  if (!p.ensHL.length) return forecastOne(prices, listed, horizon, p, atMin);
+  const qs = p.ensHL.map((hl) => forecastOne(prices, listed, horizon, { ...p, halfLife: hl }, atMin));
+  return qs[0].map((row, h) => {
+    const r = row.map((_, j) => Math.round((qs.reduce((s, q) => s + q[h][j], 0) / qs.length) * 1e6) / 1e6 + 0);
+    for (let j = 1; j < 5; j++) if (r[j] < r[j - 1]) r[j] = r[j - 1];
+    return r;
+  });
+}
+
+function forecastOne(prices: number[], listed: boolean, horizon: number, p: Params, atMin?: number): number[][] {
   const N = prices.length;
   // time-of-day activity profile: f(t) = 1 + A cos(2 pi (hourUTC - peak) / 24), t in unix minutes
   const useDiurnal = atMin !== undefined && p.diurnalA !== 0;
