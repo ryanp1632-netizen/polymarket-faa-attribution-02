@@ -197,11 +197,32 @@ export function forecastMarket(prices: number[], listed: boolean, horizon: numbe
 interface CaseMarket { id: string; start: string; prices: number[] }
 interface Case { at: string; horizon_minutes: number; quantiles: number[]; markets: CaseMarket[] }
 
+/** The house baseline's fan, used only when the model fails for a market. */
+function fallback(prices: number[], horizon: number): number[][] {
+  const x = prices.length ? prices[prices.length - 1] : 0.5;
+  const rows: number[][] = [];
+  for (let h = 1; h <= horizon; h++) rows.push(Z.map((z) => Math.round(Math.min(1, Math.max(0, x + z * 0.0025 * Math.sqrt(h))) * 1e6) / 1e6 + 0));
+  return rows;
+}
+
+function valid(q: number[][], horizon: number): boolean {
+  return q.length === horizon && q.every((r) => r.length === 5 && r.every((v, j) => Number.isFinite(v) && v >= 0 && v <= 1 && (j === 0 || v >= r[j - 1])));
+}
+
 export function forecastCase(c: Case, p: Params = DEFAULTS): { id: string; q: number[][] }[] {
   const atMs = Date.parse(c.at);
   return c.markets.map((m) => {
-    const listed = Date.parse(m.start) > atMs - 4320 * 60000 + 60000;
-    return { id: m.id, q: forecastMarket(m.prices, listed, c.horizon_minutes, p, Math.round(atMs / 60000)) };
+    const prices = (m.prices ?? []).filter((v) => Number.isFinite(v));
+    let q: number[][] = [];
+    try {
+      const listed = !Number.isFinite(Date.parse(m.start)) || Date.parse(m.start) > atMs - 4320 * 60000 + 60000;
+      const atMin = Number.isFinite(atMs) ? Math.round(atMs / 60000) : undefined;
+      if (prices.length) q = forecastMarket(prices, listed, c.horizon_minutes, p, atMin);
+    } catch {
+      q = [];
+    }
+    if (!valid(q, c.horizon_minutes)) q = fallback(prices, c.horizon_minutes);
+    return { id: m.id, q };
   });
 }
 
